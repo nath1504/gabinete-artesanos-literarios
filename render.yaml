@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: gabinete-artesanos-literarios
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    healthCheckPath: /
+    disk:
+      name: gabinete-data
+      mountPath: /var/data
+      sizeGB: 10
+    envVars:
+      - key: DATA_DIR
+        value: /var/data
+      - key: SECRET_KEY
+        generateValue: true
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: ADMIN_USERNAME
+        value: colectivo
+      - key: ADMIN_PASSWORD
+        sync: false
