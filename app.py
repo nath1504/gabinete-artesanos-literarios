@@ -1,10 +1,13 @@
 
 import os
 import uuid
+import hmac
 import logging
-from pathlib import Path
+import mimetypes
+
 from datetime import datetime
 from functools import wraps
+from urllib.parse import quote
 
 from flask import (
     Flask,
@@ -14,7 +17,7 @@ from flask import (
     url_for,
     flash,
     abort,
-    session
+    session,
 )
 
 from flask_wtf.csrf import CSRFProtect
@@ -29,63 +32,50 @@ from supabase import create_client
 
 app = Flask(__name__)
 
+logging.basicConfig(level=logging.INFO)
+
 app.secret_key = os.environ.get("SECRET_KEY")
 
 if not app.secret_key:
     raise RuntimeError("Falta configurar SECRET_KEY en Render.")
 
 app.config["SESSION_COOKIE_HTTPONLY"] = True
-app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = (
     os.environ.get("COOKIE_SECURE", "true").lower() == "true"
 )
-
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
 
-CSRFProtect(app)
+csrf = CSRFProtect(app)
 
-# Registro de errores y operaciones en Render
-logging.basicConfig(level=logging.INFO)
 
 # ============================================================
 # CONFIGURACIÓN DE SUPABASE
 # ============================================================
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip()
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "").strip()
 SUPABASE_BUCKET = os.environ.get(
     "SUPABASE_BUCKET",
     "gabinete-archivos"
-)
+).strip()
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise RuntimeError(
-        "Faltan SUPABASE_URL o SUPABASE_KEY en Render."
+        "Faltan SUPABASE_URL o SUPABASE_KEY en las variables de Render."
     )
 
-supabase = create_client(
-    SUPABASE_URL,
-    SUPABASE_KEY
-)
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 
 # ============================================================
-# CONFIGURACIÓN ADMINISTRADOR
+# CONFIGURACIÓN DEL ADMINISTRADOR
 # ============================================================
 
-ADMIN_USERNAME = os.environ.get(
-    "ADMIN_USERNAME",
-    "colectivo"
-)
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "colectivo")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+ADMIN_PASSWORD_HASH = os.environ.get("ADMIN_PASSWORD_HASH", "")
 
-ADMIN_PASSWORD = os.environ.get(
-    "ADMIN_PASSWORD",
-    ""
-)
-
-ADMIN_PASSWORD_HASH = os.environ.get(
-    "ADMIN_PASSWORD_HASH",
-    ""
-)
 
 # ============================================================
 # CATEGORÍAS
@@ -96,110 +86,148 @@ CATEGORIES = {
     "archivo": "Archivos",
     "imagen": "Imágenes",
     "sonido": "Sonidos",
-    "video": "Videos"
+    "video": "Videos",
 }
 
-ALLOWED = {
+
+# ============================================================
+# EXTENSIONES PERMITIDAS
+# ============================================================
+
+ALLOWED_EXTENSIONS = {
     "pdf", "doc", "docx", "txt", "rtf", "odt",
     "png", "jpg", "jpeg", "gif", "webp",
     "mp3", "wav", "ogg", "m4a",
     "mp4", "webm", "mov", "m4v",
-    "ppt", "pptx", "xls", "xlsx", "csv"
+    "ppt", "pptx", "xls", "xlsx", "csv",
 }
 
 
 # ============================================================
-# FUNCIONES GENERALES
+# FUNCIONES AUXILIARES
 # ============================================================
 
-def valid_admin_password(candidate):
-
-    if ADMIN_PASSWORD_HASH:
-        return check_password_hash(
-            ADMIN_PASSWORD_HASH,
-            candidate
-        )
+def allowed_file(filename):
+    """Comprueba que el archivo tenga una extensión permitida."""
 
     return (
-        bool(ADMIN_PASSWORD)
-        and candidate == ADMIN_PASSWORD
+        "." in filename
+        and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
     )
 
 
+def is_member():
+    """Comprueba si existe una sesión de administrador."""
+
+    return session.get("is_member") is True
+
+
 def login_required(view):
+    """Protege las rutas que requieren iniciar sesión."""
 
     @wraps(view)
-    def wrapped(*args, **kwargs):
-
-        if not session.get("is_member"):
-
-            flash(
-                "Inicia sesión como integrante del colectivo.",
-                "error"
-            )
-
+    def wrapped_view(*args, **kwargs):
+        if not is_member():
+            flash("Debes iniciar sesión para realizar esta acción.", "warning")
             return redirect(
                 url_for("login", next=request.path)
             )
 
         return view(*args, **kwargs)
 
-    return wrapped
+    return wrapped_view
 
 
-def allowed(filename):
+def get_file_url(filename):
+    """
+    Genera una URL temporal de Supabase Storage.
 
-    return (
-        "." in filename
-        and filename.rsplit(".", 1)[1].lower() in ALLOWED
-    )
+    Permite trabajar con buckets privados sin hacer público
+    el contenido de los archivos.
+    """
 
+    if not filename:
+        return ""
 
-def get_material(item_id):
+    try:
+        result = supabase.storage.from_(
+            SUPABASE_BUCKET
+        ).create_signed_url(filename, 3600)
 
-    result = (
-        supabase.table("materials")
-        .select("*")
-        .eq("id", item_id)
-        .limit(1)
-        .execute()
-    )
+        if isinstance(result, dict):
+            signed_url = (
+                result.get("signedURL")
+                or result.get("signedUrl")
+                or result.get("signed_url")
+            )
+        elif isinstance(result, str):
+            signed_url = result
+        else:
+            signed_url = None
 
-    return result.data[0] if result.data else None
+        if not signed_url:
+            app.logger.error(
+                "Supabase no devolvió una URL para: %s",
+                filename
+            )
+            return ""
 
+        if signed_url.startswith("http://") or signed_url.startswith("https://"):
+            return signed_url
 
-# ============================================================
-# SUPABASE STORAGE
-# ============================================================
+        if signed_url.startswith("/storage/v1/"):
+            return SUPABASE_URL.rstrip("/") + signed_url
+
+        if signed_url.startswith("/"):
+            return (
+                SUPABASE_URL.rstrip("/")
+                + "/storage/v1"
+                + signed_url
+            )
+
+        return (
+            SUPABASE_URL.rstrip("/")
+            + "/storage/v1/"
+            + signed_url.lstrip("/")
+        )
+
+    except Exception:
+        app.logger.exception(
+            "Error generando URL para el archivo %s",
+            filename
+        )
+        return ""
+
 
 def upload_file(file):
-
     """
-    Recibe un archivo desde Flask y lo guarda
-    permanentemente en el bucket de Supabase.
+    Sube un archivo a Supabase Storage.
+
+    Devuelve:
+    stored_name: nombre interno del archivo.
+    original_name: nombre original del archivo.
     """
 
     if not file or not file.filename:
         return None, None
 
-    original_name = os.path.basename(file.filename)
+    original_name = file.filename.strip()
 
-    if not allowed(original_name):
-        raise ValueError("Tipo de archivo no permitido.")
+    if not allowed_file(original_name):
+        raise ValueError(
+            "El tipo de archivo no está permitido."
+        )
 
     safe_name = secure_filename(original_name)
 
     if not safe_name:
-        safe_name = "archivo"
+        raise ValueError(
+            "No se pudo procesar el nombre del archivo."
+        )
 
-    # Nombre único para evitar sobrescribir documentos
-    stored_name = (
-        uuid.uuid4().hex
-        + "_"
-        + safe_name
-    )
+    extension = safe_name.rsplit(".", 1)[1].lower()
+    stored_name = f"{uuid.uuid4().hex}.{extension}"
 
-    # Leer contenido
     file_content = file.read()
 
     if not file_content:
@@ -207,6 +235,7 @@ def upload_file(file):
 
     mime_type = (
         file.mimetype
+        or mimetypes.guess_type(original_name)[0]
         or "application/octet-stream"
     )
 
@@ -217,15 +246,14 @@ def upload_file(file):
         SUPABASE_BUCKET
     )
 
-    # Subir archivo a Supabase Storage
-    result = supabase.storage.from_(
+    supabase.storage.from_(
         SUPABASE_BUCKET
     ).upload(
         path=stored_name,
         file=file_content,
         file_options={
             "content-type": mime_type,
-            "upsert": "false"
+            "upsert": "false",
         }
     )
 
@@ -237,38 +265,46 @@ def upload_file(file):
     return stored_name, original_name
 
 
-def get_file_url(filename):
-
-    if not filename:
-        return ""
-
-    return supabase.storage.from_(
-        SUPABASE_BUCKET
-    ).get_public_url(filename)
-
-
 def delete_file(filename):
+    """Elimina un archivo de Supabase Storage."""
 
     if not filename:
         return
 
     try:
-
         supabase.storage.from_(
             SUPABASE_BUCKET
         ).remove([filename])
 
         app.logger.info(
-            "ARCHIVO ELIMINADO DE STORAGE: %s",
+            "ARCHIVO ELIMINADO: %s",
             filename
         )
 
     except Exception:
-
         app.logger.exception(
             "No se pudo eliminar el archivo: %s",
             filename
         )
+
+
+def prepare_material(item):
+    """
+    Agrega file_url al material para que las plantillas
+    puedan mostrar imágenes, audios y videos.
+    """
+
+    if not item:
+        return item
+
+    if item.get("stored_name"):
+        item["file_url"] = get_file_url(
+            item["stored_name"]
+        )
+    else:
+        item["file_url"] = ""
+
+    return item
 
 
 # ============================================================
@@ -278,54 +314,80 @@ def delete_file(filename):
 @app.route("/ingresar", methods=["GET", "POST"])
 def login():
 
+    if is_member():
+        return redirect(url_for("index"))
+
     if request.method == "POST":
 
         username = request.form.get(
-            "username",
-            ""
+            "username", ""
         ).strip()
 
         password = request.form.get(
-            "password",
-            ""
+            "password", ""
         )
 
-        if (
-            username == ADMIN_USERNAME
-            and valid_admin_password(password)
-        ):
+        valid_username = hmac.compare_digest(
+            username,
+            ADMIN_USERNAME
+        )
+
+        valid_password = False
+
+        if ADMIN_PASSWORD_HASH:
+            try:
+                valid_password = check_password_hash(
+                    ADMIN_PASSWORD_HASH,
+                    password
+                )
+            except ValueError:
+                app.logger.exception(
+                    "El hash de ADMIN_PASSWORD_HASH no es válido."
+                )
+
+        elif ADMIN_PASSWORD:
+            valid_password = hmac.compare_digest(
+                password,
+                ADMIN_PASSWORD
+            )
+
+        if valid_username and valid_password:
 
             session.clear()
-
             session["is_member"] = True
-            session["member_name"] = username
+            session["username"] = username
 
             flash(
-                "Sesión iniciada correctamente.",
+                "¡Bienvenido al Gabinete Digital!",
                 "success"
             )
 
-            return redirect(
-                request.args.get("next")
-                or url_for("index")
-            )
+            next_page = request.args.get("next", "")
+
+            if next_page.startswith("/") and not next_page.startswith("//"):
+                return redirect(next_page)
+
+            return redirect(url_for("index"))
 
         flash(
             "Usuario o contraseña incorrectos.",
-            "error"
+            "danger"
         )
 
     return render_template("login.html")
 
 
-@app.route("/salir", methods=["POST"])
-@login_required
+# ============================================================
+# CERRAR SESIÓN
+# ============================================================
+
+@app.route("/salir")
 def logout():
 
     session.clear()
 
     flash(
-        "Has cerrado tu sesión.",
+        "Has cerrado sesión correctamente.",
         "success"
     )
 
@@ -340,110 +402,115 @@ def logout():
 def index():
 
     category = request.args.get(
-        "categoria",
-        ""
-    )
+        "categoria", ""
+    ).strip()
 
     search = request.args.get(
-        "buscar",
-        ""
+        "buscar", ""
     ).strip()
 
     sort = request.args.get(
-        "orden",
-        "reciente"
-    )
+        "orden", "recientes"
+    ).strip()
 
-    query = supabase.table(
-        "materials"
-    ).select("*")
+    try:
 
-    if category in CATEGORIES:
-        query = query.eq("category", category)
-
-    if search:
-
-        safe_search = (
-            search
-            .replace(",", " ")
-            .replace("%", "")
-            .replace("*", "")
+        # Obtener todos los materiales para calcular estadísticas.
+        all_response = (
+            supabase.table("materials")
+            .select("*")
+            .execute()
         )
 
-        query = query.or_(
-            f"title.ilike.%{safe_search}%,"
-            f"description.ilike.%{safe_search}%,"
-            f"body.ilike.%{safe_search}%,"
-            f"original_name.ilike.%{safe_search}%"
-        )
+        all_items = all_response.data or []
 
-    if sort == "autor":
+        counts = {
+            category_key: 0
+            for category_key in CATEGORIES
+        }
 
+        for material in all_items:
+            material_category = material.get("category")
+
+            if material_category in counts:
+                counts[material_category] += 1
+
+        # Consulta de materiales.
         query = (
-            query.order("author")
-            .order("title")
+            supabase.table("materials")
+            .select("*")
         )
 
-    elif sort == "fecha_antigua":
+        if category in CATEGORIES:
+            query = query.eq("category", category)
 
-        query = (
-            query.order(
-                "material_date",
+        if search:
+            safe_search = (
+                search
+                .replace("%", "")
+                .replace(",", " ")
+            )
+
+            query = query.ilike(
+                "title",
+                f"%{safe_search}%"
+            )
+
+        if sort == "antiguos":
+            query = query.order(
+                "created_at",
                 desc=False
             )
-            .order("id", desc=True)
-        )
-
-    elif sort == "fecha_reciente":
-
-        query = (
-            query.order(
-                "material_date",
+        else:
+            query = query.order(
+                "created_at",
                 desc=True
             )
-            .order("id", desc=True)
+
+        response = query.execute()
+
+        items = response.data or []
+
+        # Generar URL temporal para cada archivo.
+        for item in items:
+            prepare_material(item)
+
+        return render_template(
+            "index.html",
+            materials=items,
+            counts=counts,
+            categories=CATEGORIES,
+            selected=category,
+            search=search,
+            sort=sort
         )
 
-    else:
-
-        query = query.order(
-            "id",
-            desc=True
+    except Exception:
+        app.logger.exception(
+            "Error cargando la página principal."
         )
 
-    items = query.execute().data or []
-
-    # Conteo por categoría
-    all_items = (
-        supabase.table("materials")
-        .select("category")
-        .execute()
-        .data or []
-    )
-
-    counts = {}
-
-    for item in all_items:
-
-        cat = item.get("category", "")
-
-        counts[cat] = (
-            counts.get(cat, 0) + 1
+        flash(
+            "No se pudieron cargar los materiales.",
+            "danger"
         )
 
-    return render_template(
-        "index.html",
-        materials=items,
-        counts=counts,
-        categories=CATEGORIES,
-        selected=category,
-        search=search,
-        sort=sort
-    )
+        return render_template(
+            "index.html",
+            materials=[],
+            counts={
+                category_key: 0
+                for category_key in CATEGORIES
+            },
+            categories=CATEGORIES,
+            selected=category,
+            search=search,
+            sort=sort
+        )
 
 
 # ============================================================
-# PUBLICAR MATERIAL
+# AGREGAR MATERIAL
 # ============================================================
 
 @app.route("/nuevo", methods=["GET", "POST"])
@@ -453,386 +520,333 @@ def nuevo():
     if request.method == "POST":
 
         title = request.form.get(
-            "title",
-            ""
+            "title", ""
         ).strip()
 
         category = request.form.get(
-            "category",
-            "texto"
-        )
+            "category", ""
+        ).strip()
 
         description = request.form.get(
-            "description",
-            ""
+            "description", ""
         ).strip()
 
         body = request.form.get(
-            "body",
-            ""
+            "body", ""
         ).strip()
 
         author = request.form.get(
-            "author",
-            ""
+            "author", ""
         ).strip()
 
         material_date = request.form.get(
-            "material_date",
-            ""
+            "material_date", ""
         ).strip()
 
-        uploaded = request.files.get("file")
+        file = request.files.get("file")
 
-        stored = ""
-        original = ""
-
-        if not title or category not in CATEGORIES:
-
-            flash(
-                "Escribe un título y selecciona una categoría.",
-                "error"
-            )
-
-            return redirect(url_for("nuevo"))
-
-        # ----------------------------------------------------
-        # SUBIR ARCHIVO A SUPABASE STORAGE
-        # ----------------------------------------------------
-
-        if uploaded and uploaded.filename:
-
-            try:
-
-                stored, original = upload_file(uploaded)
-
-                # Leer contenido de archivos TXT
-                if (
-                    category == "texto"
-                    and original.lower().endswith(".txt")
-                    and not body
-                ):
-
-                    # Se obtiene el contenido del archivo
-                    # desde Storage para conservar el flujo
-                    # de subida original.
-                    pass
-
-            except ValueError as error:
-
-                flash(str(error), "error")
-
-                return redirect(url_for("nuevo"))
-
-            except Exception:
-
-                app.logger.exception(
-                    "ERROR AL SUBIR ARCHIVO A SUPABASE STORAGE."
-                )
-
-                flash(
-                    "No se pudo subir el archivo. "
-                    "Revisa los Logs de Render.",
-                    "error"
-                )
-
-                return redirect(url_for("nuevo"))
-
-        # ----------------------------------------------------
-        # VALIDAR CONTENIDO
-        # ----------------------------------------------------
-
-        if category == "texto" and not body and not stored:
-
-            flash(
-                "Escribe el texto o adjunta un archivo.",
-                "error"
-            )
-
-            return redirect(url_for("nuevo"))
-
-        if category != "texto" and not stored:
-
-            flash(
-                "Adjunta un archivo para esta categoría.",
-                "error"
-            )
-
-            return redirect(url_for("nuevo"))
-
-        # ----------------------------------------------------
-        # GUARDAR DATOS EN SUPABASE DATABASE
-        # ----------------------------------------------------
-
-        publication = {
-
-            "title": title,
-            "category": category,
-            "description": description,
-            "body": body,
-            "stored_name": stored,
-            "original_name": original,
-
-            "created_at": datetime.now().strftime(
-                "%d/%m/%Y %H:%M"
-            ),
-
-            "author": author,
-            "material_date": material_date
-        }
+        stored_name = None
+        original_name = None
 
         try:
 
-            result = (
-                supabase.table("materials")
-                .insert(publication)
-                .execute()
+            if not title:
+                raise ValueError(
+                    "Debes escribir el título del material."
+                )
+
+            if category not in CATEGORIES:
+                raise ValueError(
+                    "Selecciona una categoría válida."
+                )
+
+            # Si se trata de un texto y se adjunta un TXT,
+            # se incorpora su contenido al campo body.
+            if category == "texto" and file and file.filename:
+                extension = file.filename.rsplit(".", 1)[-1].lower()
+
+                if extension == "txt" and not body:
+                    content = file.read()
+                    body = content.decode(
+                        "utf-8",
+                        errors="replace"
+                    )
+
+                    file.stream.seek(0)
+
+            # Subir archivo, si existe.
+            if file and file.filename:
+                stored_name, original_name = upload_file(file)
+
+            material_data = {
+                "title": title,
+                "category": category,
+                "description": description,
+                "body": body,
+                "stored_name": stored_name,
+                "original_name": original_name,
+                "created_at": datetime.now().isoformat(
+                    timespec="seconds"
+                ),
+                "author": author,
+                "material_date": material_date,
+            }
+
+            supabase.table(
+                "materials"
+            ).insert(
+                material_data
+            ).execute()
+
+            flash(
+                "El material se agregó correctamente al gabinete.",
+                "success"
             )
 
-            app.logger.info(
-                "MATERIAL GUARDADO EN DATABASE: %s",
-                title
-            )
+            return redirect(url_for("index"))
+
+        except ValueError as error:
+
+            if stored_name:
+                delete_file(stored_name)
+
+            flash(str(error), "warning")
 
         except Exception:
 
-            app.logger.exception(
-                "ERROR AL GUARDAR MATERIAL EN DATABASE."
-            )
+            if stored_name:
+                delete_file(stored_name)
 
-            # Si falla el registro, eliminar el archivo
-            # para evitar documentos huérfanos.
-            if stored:
-                delete_file(stored)
+            app.logger.exception(
+                "Error guardando un nuevo material."
+            )
 
             flash(
-                "No se pudo guardar la publicación.",
-                "error"
+                "Ocurrió un error al guardar el material. Revisa los registros de Render.",
+                "danger"
             )
-
-            return redirect(url_for("nuevo"))
-
-        flash(
-            "¡Material y archivo guardados correctamente!",
-            "success"
-        )
-
-        return redirect(
-            url_for(
-                "index",
-                categoria=category
-            )
-        )
 
     return render_template(
         "form.html",
-        categories=CATEGORIES,
-        item=None
-    )
-
-
-# ============================================================
-# DETALLE DE PUBLICACIÓN
-# ============================================================
-
-@app.route("/material/<int:item_id>")
-def detalle(item_id):
-
-    item = get_material(item_id)
-
-    if not item:
-        abort(404)
-
-    return render_template(
-        "detail.html",
-        item=item,
+        item=None,
         categories=CATEGORIES
     )
 
 
 # ============================================================
-# EDITAR PUBLICACIÓN
+# DETALLE DEL MATERIAL
 # ============================================================
 
-@app.route(
-    "/material/<int:item_id>/editar",
-    methods=["GET", "POST"]
-)
+@app.route("/material/<int:item_id>")
+def detalle(item_id):
+
+    try:
+
+        response = (
+            supabase.table("materials")
+            .select("*")
+            .eq("id", item_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not response.data:
+            abort(404)
+
+        item = response.data[0]
+
+        # Generar URL temporal para la plantilla detail.html.
+        prepare_material(item)
+
+        return render_template(
+            "detail.html",
+            item=item,
+            categories=CATEGORIES
+        )
+
+    except Exception as error:
+
+        if getattr(error, "code", None) == "404":
+            abort(404)
+
+        app.logger.exception(
+            "Error consultando el material %s.",
+            item_id
+        )
+
+        raise
+
+
+# ============================================================
+# EDITAR MATERIAL
+# ============================================================
+
+@app.route("/material/<int:item_id>/editar", methods=["GET", "POST"])
 @login_required
 def editar(item_id):
 
-    item = get_material(item_id)
+    try:
 
-    if not item:
-        abort(404)
+        response = (
+            supabase.table("materials")
+            .select("*")
+            .eq("id", item_id)
+            .limit(1)
+            .execute()
+        )
 
-    if request.method == "POST":
+        if not response.data:
+            abort(404)
 
-        title = request.form.get(
-            "title",
-            ""
-        ).strip()
+        item = response.data[0]
 
-        if not title:
+        if request.method == "POST":
 
-            flash(
-                "El título es obligatorio.",
-                "error"
-            )
-
-            return redirect(
-                url_for(
-                    "editar",
-                    item_id=item_id
-                )
-            )
-
-        changes = {
-
-            "title": title,
-
-            "description": request.form.get(
-                "description",
-                ""
-            ).strip(),
-
-            "body": request.form.get(
-                "body",
-                ""
-            ).strip(),
-
-            "author": request.form.get(
-                "author",
-                ""
-            ).strip(),
-
-            "material_date": request.form.get(
-                "material_date",
-                ""
+            title = request.form.get(
+                "title", ""
             ).strip()
-        }
 
-        try:
+            description = request.form.get(
+                "description", ""
+            ).strip()
+
+            body = request.form.get(
+                "body", ""
+            ).strip()
+
+            author = request.form.get(
+                "author", ""
+            ).strip()
+
+            material_date = request.form.get(
+                "material_date", ""
+            ).strip()
+
+            if not title:
+                flash(
+                    "El título no puede estar vacío.",
+                    "warning"
+                )
+
+                return render_template(
+                    "form.html",
+                    item=item,
+                    categories=CATEGORIES
+                )
+
+            updated_data = {
+                "title": title,
+                "description": description,
+                "body": body,
+                "author": author,
+                "material_date": material_date,
+            }
 
             supabase.table(
                 "materials"
             ).update(
-                changes
+                updated_data
             ).eq(
-                "id",
-                item_id
+                "id", item_id
             ).execute()
 
             flash(
-                "Cambios guardados correctamente.",
+                "El material se actualizó correctamente.",
                 "success"
             )
 
-        except Exception:
-
-            app.logger.exception(
-                "ERROR AL EDITAR MATERIAL."
+            return redirect(
+                url_for("detalle", item_id=item_id)
             )
 
-            flash(
-                "No se pudieron guardar los cambios.",
-                "error"
-            )
-
-        return redirect(
-            url_for(
-                "detalle",
-                item_id=item_id
-            )
+        return render_template(
+            "form.html",
+            item=item,
+            categories=CATEGORIES
         )
 
-    return render_template(
-        "form.html",
-        categories=CATEGORIES,
-        item=item
-    )
+    except Exception:
+        app.logger.exception(
+            "Error editando el material %s.",
+            item_id
+        )
+
+        flash(
+            "No se pudo editar el material.",
+            "danger"
+        )
+
+        return redirect(
+            url_for("detalle", item_id=item_id)
+        )
 
 
 # ============================================================
-# ELIMINAR PUBLICACIÓN
+# ELIMINAR MATERIAL
 # ============================================================
 
-@app.route(
-    "/material/<int:item_id>/eliminar",
-    methods=["POST"]
-)
+@app.route("/material/<int:item_id>/eliminar", methods=["POST"])
 @login_required
 def eliminar(item_id):
 
-    item = get_material(item_id)
+    try:
 
-    if item:
-
-        stored = item.get(
-            "stored_name",
-            ""
+        response = (
+            supabase.table("materials")
+            .select("id, title, stored_name")
+            .eq("id", item_id)
+            .limit(1)
+            .execute()
         )
 
-        try:
+        if not response.data:
+            abort(404)
 
-            supabase.table(
-                "materials"
-            ).delete().eq(
-                "id",
-                item_id
-            ).execute()
+        item = response.data[0]
 
-            delete_file(stored)
+        # Eliminar primero el registro de la base de datos.
+        supabase.table(
+            "materials"
+        ).delete().eq(
+            "id", item_id
+        ).execute()
 
-            flash(
-                "Material eliminado.",
-                "success"
-            )
-
-        except Exception:
-
-            app.logger.exception(
-                "ERROR AL ELIMINAR MATERIAL."
-            )
-
-            flash(
-                "No se pudo eliminar el material.",
-                "error"
-            )
-
-    else:
+        # Después eliminar el archivo de Storage.
+        if item.get("stored_name"):
+            delete_file(item["stored_name"])
 
         flash(
-            "El material no existe.",
-            "error"
+            "El material se eliminó correctamente.",
+            "success"
+        )
+
+    except Exception:
+        app.logger.exception(
+            "Error eliminando el material %s.",
+            item_id
+        )
+
+        flash(
+            "No se pudo eliminar el material.",
+            "danger"
         )
 
     return redirect(url_for("index"))
 
 
 # ============================================================
-# MOSTRAR ARCHIVOS
+# VISUALIZAR ARCHIVOS
 # ============================================================
 
 @app.route("/uploads/<path:filename>")
 def uploaded_file(filename):
 
-    try:
+    file_url = get_file_url(filename)
 
-        url = get_file_url(filename)
-
-        if not url:
-            abort(404)
-
-        return redirect(url)
-
-    except Exception:
-
-        app.logger.exception(
-            "ERROR AL OBTENER URL DEL ARCHIVO."
-        )
-
+    if not file_url:
         abort(404)
+
+    return redirect(file_url)
 
 
 # ============================================================
@@ -842,52 +856,77 @@ def uploaded_file(filename):
 @app.route("/material/<int:item_id>/descargar")
 def descargar(item_id):
 
-    item = get_material(item_id)
-
-    if not item or not item.get("stored_name"):
-        abort(404)
-
     try:
 
-        url = get_file_url(
-            item["stored_name"]
+        response = (
+            supabase.table("materials")
+            .select("id, stored_name, original_name")
+            .eq("id", item_id)
+            .limit(1)
+            .execute()
         )
 
-        return redirect(url)
+        if not response.data:
+            abort(404)
+
+        item = response.data[0]
+
+        stored_name = item.get("stored_name")
+
+        if not stored_name:
+            abort(404)
+
+        file_url = get_file_url(stored_name)
+
+        if not file_url:
+            abort(404)
+
+        return redirect(file_url)
 
     except Exception:
-
         app.logger.exception(
-            "ERROR AL DESCARGAR ARCHIVO."
+            "Error descargando el material %s.",
+            item_id
         )
-
         abort(404)
 
 
 # ============================================================
-# COMPROBAR CONEXIÓN Y ESTADO
+# COMPROBACIÓN DEL SERVIDOR
 # ============================================================
 
-@app.get("/health")
+@app.route("/health")
 def health():
 
     return {
         "status": "ok",
-        "database": "configured",
-        "storage_bucket": SUPABASE_BUCKET
+        "database_configured": bool(
+            SUPABASE_URL and SUPABASE_KEY
+        ),
+        "bucket_configured": bool(
+            SUPABASE_BUCKET
+        ),
     }
 
 
 # ============================================================
-# ERROR: ARCHIVO DEMASIADO GRANDE
+# ERRORES
 # ============================================================
 
+@app.errorhandler(404)
+def not_found(error):
+
+    return render_template(
+        "404.html"
+    ), 404
+
+
 @app.errorhandler(413)
-def too_large(error):
+def file_too_large(error):
 
     flash(
         "El archivo supera el límite permitido de 50 MB.",
-        "error"
+        "danger"
     )
 
     return redirect(url_for("nuevo"))
@@ -899,8 +938,12 @@ def too_large(error):
 
 if __name__ == "__main__":
 
+    port = int(
+        os.environ.get("PORT", 5000)
+    )
+
     app.run(
         host="0.0.0.0",
-        port=int(os.environ.get("PORT", 5000)),
+        port=port,
         debug=False
     )
