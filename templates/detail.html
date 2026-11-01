@@ -1,3 +1,114 @@
-{% extends "base.html" %}{% block title %}{{item.title}} · Gabinete{% endblock %}{% block content %}<div class="detail-wrap"><a class="back-link" href="{{url_for('index',categoria=item.category)}}">← Volver a {{categories[item.category]}}</a><article class="detail-card"><div class="card-top"><span class="type-icon {{item.category}}">{{ {'texto':'▤','archivo':'▣','imagen':'▧','sonido':'♫','video':'▶'}[item.category] }}</span><span class="tag {{item.category}}">{{categories[item.category]}}</span></div><h1>{{item.title}}</h1>{% if item.author %}<p class="detail-description">✍ Autor: <strong>{{item.author}}</strong></p>{% endif %}{% if item.material_date %}<p class="detail-description">📅 Fecha: <strong>{{item.material_date}}</strong></p>{% endif %}{% if item.description %}<p class="detail-description">{{item.description}}</p>{% endif %}<p class="detail-date">Agregado al gabinete el {{item.created_at}}</p>
-{% if item.category=='texto' and item.body %}<div class="full-text">{{item.body}}</div>{% endif %}{% if item.category=='imagen' and item.stored_name %}<img class="detail-image" src="{{url_for('uploaded_file',filename=item.stored_name)}}" alt="{{item.title}}">{% endif %}{% if item.category=='sonido' and item.stored_name %}<audio controls class="detail-audio" src="{{url_for('uploaded_file',filename=item.stored_name)}}"></audio>{% endif %}{% if item.category=='video' and item.stored_name %}<video class="detail-video" controls preload="metadata"><source src="{{url_for('uploaded_file',filename=item.stored_name)}}">Tu navegador no puede reproducir este video.</video>{% endif %}
-{% if item.stored_name %}<p class="file-name">📎 {{item.original_name}}</p><a class="button primary" href="{{url_for('descargar',item_id=item.id)}}">Descargar archivo</a>{% endif %}{% if session.get("is_member") %}<div class="detail-actions"><a class="button secondary" href="{{url_for('editar',item_id=item.id)}}">Editar material</a><form method="post" action="{{url_for('eliminar',item_id=item.id)}}" onsubmit="return confirm('¿Seguro que quieres eliminar este material?');"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><button class="button danger" type="submit">Eliminar material</button></form></div>{% endif %}</article></div>{% endblock %}
+
+{% extends "base.html" %}
+
+{% block title %}{{ item.title }} · Gabinete{% endblock %}
+
+{% block content %}
+<div class="detail-wrap">
+
+    <a class="back-link" href="{{ url_for('index', categoria=item.category) }}">
+        ← Volver a {{ categories[item.category] }}
+    </a>
+
+    <article class="detail-card">
+
+        <div class="card-top">
+            <span class="type-icon {{ item.category }}">
+                {{ {'texto':'▤','archivo':'▣','imagen':'▧','sonido':'♫','video':'▶'}[item.category] }}
+            </span>
+
+            <span class="tag {{ item.category }}">
+                {{ categories[item.category] }}
+            </span>
+        </div>
+
+        <h1>{{ item.title }}</h1>
+
+        {% if item.author %}
+        <p class="detail-description">
+            ✍ Autor: <strong>{{ item.author }}</strong>
+        </p>
+        {% endif %}
+
+        {% if item.material_date %}
+        <p class="detail-description">
+            📅 Fecha: <strong>{{ item.material_date }}</strong>
+        </p>
+        {% endif %}
+
+        {% if item.description %}
+        <p class="detail-description">{{ item.description }}</p>
+        {% endif %}
+
+        <p class="detail-date">
+            Agregado al gabinete el {{ item.created_at }}
+        </p>
+
+        {% if item.category == 'texto' and item.body %}
+        <div class="full-text">{{ item.body }}</div>
+        {% endif %}
+
+        {% if item.category == 'imagen' and item.file_url %}
+        <img
+            class="detail-image"
+            src="{{ item.file_url }}"
+            alt="{{ item.title }}"
+        >
+        {% endif %}
+
+        {% if item.category == 'sonido' and item.file_url %}
+        <audio
+            controls
+            class="detail-audio"
+            preload="none"
+            src="{{ item.file_url }}">
+        </audio>
+        {% endif %}
+
+        {% if item.category == 'video' and item.file_url %}
+        <video class="detail-video" controls preload="metadata">
+            <source src="{{ item.file_url }}">
+            Tu navegador no puede reproducir este video.
+        </video>
+        {% endif %}
+
+        {% if item.stored_name %}
+        <p class="file-name">
+            📎 {{ item.original_name }}
+        </p>
+
+        <a class="button primary"
+           href="{{ url_for('descargar', item_id=item.id) }}">
+            Descargar archivo
+        </a>
+        {% endif %}
+
+        {% if session.get("is_member") %}
+        <div class="detail-actions">
+
+            <a class="button secondary"
+               href="{{ url_for('editar', item_id=item.id) }}">
+                Editar material
+            </a>
+
+            <form
+                method="post"
+                action="{{ url_for('eliminar', item_id=item.id) }}"
+                onsubmit="return confirm('¿Seguro que quieres eliminar este material?');">
+
+                <input
+                    type="hidden"
+                    name="csrf_token"
+                    value="{{ csrf_token() }}">
+
+                <button class="button danger" type="submit">
+                    Eliminar material
+                </button>
+
+            </form>
+        </div>
+        {% endif %}
+
+    </article>
+</div>
+{% endblock %}
