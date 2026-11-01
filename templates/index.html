@@ -1,14 +1,466 @@
-{% extends "base.html" %}{% block title %}Gabinete del Taller de Artesanos Literarios{% endblock %}{% block content %}
-<section class="hero"><div><p class="eyebrow">TU ESPACIO CREATIVO</p><h1>Bienvenido al Gabinete<br>del Taller de Artesanos Literarios</h1><p class="hero-sub">Aquí guardas tus ideas, textos, imágenes, sonidos y videos.</p></div><div class="hero-art">📚<span>✒</span></div></section>
-<div class="actions">{% if session.get("is_member") %}<a class="action purple" href="{{url_for('nuevo')}}">＋ <span>Nuevo material</span></a><a class="action blue" href="{{url_for('nuevo')}}">↑ <span>Subir archivo</span></a>{% endif %}<a class="action green" href="{{url_for('index',categoria='imagen')}}">▧ <span>Ver imágenes</span></a><a class="action orange" href="{{url_for('index',categoria='video')}}">▶ <span>Ver videos</span></a></div>
-<div class="section-heading"><div><h2>{% if selected %}{{categories[selected]}}{% elif search %}Resultados de búsqueda{% else %}Tu colección creativa{% endif %}</h2><p>Todo lo que inspira al taller, en un solo lugar.</p></div>{% if selected or search %}<a class="text-link" href="{{url_for('index')}}">Ver todo ↗</a>{% endif %}</div>
-<div class="stats">{% for key,label in categories.items() %}<a class="stat stat-link" href="{{url_for('index',categoria=key)}}"><span class="stat-icon {{key}}">{{ {'texto':'▤','archivo':'▣','imagen':'▧','sonido':'♫','video':'▶'}[key] }}</span><div><strong>{{counts.get(key,0)}}</strong><small>{{label}}</small></div></a>{% endfor %}</div>
-<form class="sort-bar" action="{{url_for('index')}}" method="get">{% if selected %}<input type="hidden" name="categoria" value="{{selected}}">{% endif %}{% if search %}<input type="hidden" name="buscar" value="{{search}}">{% endif %}<label for="orden">Ordenar por:</label><select id="orden" name="orden" onchange="this.form.submit()"><option value="reciente" {{'selected' if sort=='reciente'}}>Más recientes agregados</option><option value="fecha_reciente" {{'selected' if sort=='fecha_reciente'}}>Fecha: más nueva</option><option value="fecha_antigua" {{'selected' if sort=='fecha_antigua'}}>Fecha: más antigua</option><option value="autor" {{'selected' if sort=='autor'}}>Nombre del autor (A-Z)</option></select></form>
-{% if materials %}<div class="materials-grid">{% for item in materials %}<article class="material-card"><div class="card-top"><span class="type-icon {{item.category}}">{{ {'texto':'▤','archivo':'▣','imagen':'▧','sonido':'♫','video':'▶'}[item.category] }}</span><span class="tag {{item.category}}">{{categories[item.category]}}</span></div><h3><a href="{{url_for('detalle',item_id=item.id)}}">{{item.title}}</a></h3>{% if item.author %}<p class="byline">✍ {{item.author}}</p>{% endif %}{% if item.material_date %}<p class="byline">📅 {{item.material_date}}</p>{% endif %}{% if item.description %}<p class="description">{{item.description}}</p>{% endif %}
-{% if item.category=='texto' and item.body %}<div class="preview">{{item.body[:180]}}{{'…' if item.body|length>180 else ''}}</div>{% endif %}
-{% if item.category=='imagen' and item.stored_name %}<a href="{{url_for('uploaded_file',filename=item.stored_name)}}" target="_blank"><img class="preview-image" src="{{url_for('uploaded_file',filename=item.stored_name)}}" alt="{{item.title}}"></a>{% endif %}
-{% if item.category=='sonido' and item.stored_name %}<audio controls preload="none" src="{{url_for('uploaded_file',filename=item.stored_name)}}"></audio>{% endif %}
-{% if item.category=='video' and item.stored_name %}<video class="preview-video" controls preload="metadata"><source src="{{url_for('uploaded_file',filename=item.stored_name)}}">Tu navegador no puede reproducir este video.</video>{% endif %}
-{% if item.category=='archivo' and item.original_name %}<p class="file-name">📄 {{item.original_name}}</p>{% endif %}
-<div class="card-bottom"><small>Agregado: {{item.created_at}}</small><div class="card-links"><a href="{{url_for('detalle',item_id=item.id)}}">Abrir</a>{% if item.stored_name %}<a href="{{url_for('descargar',item_id=item.id)}}">Descargar</a>{% endif %}</div></div></article>{% endfor %}</div>
-{% else %}<div class="empty"><div class="empty-icon">✧</div><h3>Tu gabinete está listo para inspirarse</h3><p>Aún no hay materiales publicados. {% if session.get("is_member") %}Agrega el primer contenido del colectivo.{% else %}Vuelve pronto para descubrir las creaciones del colectivo.{% endif %}</p>{% if session.get("is_member") %}<a class="action purple" href="{{url_for('nuevo')}}">＋ Agregar primer material</a>{% endif %}</div>{% endif %}{% endblock %}
+
+{% extends "base.html" %}
+
+{% block title %}
+Gabinete del Taller de Artesanos Literarios
+{% endblock %}
+
+{% block content %}
+
+<!-- ================================================== -->
+<!-- BIENVENIDA -->
+<!-- ================================================== -->
+
+<section class="hero">
+
+    <div>
+        <p class="eyebrow">TU ESPACIO CREATIVO</p>
+
+        <h1>
+            Bienvenido al Gabinete<br>
+            del Taller de Artesanos Literarios
+        </h1>
+
+        <p class="hero-sub">
+            Aquí guardas tus ideas, textos, imágenes,
+            sonidos y videos.
+        </p>
+    </div>
+
+    <div class="hero-art">
+        📚
+        <span>✒</span>
+    </div>
+
+</section>
+
+
+<!-- ================================================== -->
+<!-- ACCIONES -->
+<!-- ================================================== -->
+
+<div class="actions">
+
+    {% if session.get("is_member") %}
+
+        <a class="action purple" href="{{ url_for('nuevo') }}">
+            ＋ <span>Nuevo material</span>
+        </a>
+
+        <a class="action blue" href="{{ url_for('nuevo') }}">
+            ↑ <span>Subir archivo</span>
+        </a>
+
+    {% endif %}
+
+    <a class="action green"
+       href="{{ url_for('index', categoria='imagen') }}">
+        ▧ <span>Ver imágenes</span>
+    </a>
+
+    <a class="action orange"
+       href="{{ url_for('index', categoria='video') }}">
+        ▶ <span>Ver videos</span>
+    </a>
+
+</div>
+
+
+<!-- ================================================== -->
+<!-- ENCABEZADO DE COLECCIÓN -->
+<!-- ================================================== -->
+
+<div class="section-heading">
+
+    <div>
+
+        <h2>
+            {% if selected %}
+                {{ categories[selected] }}
+
+            {% elif search %}
+                Resultados de búsqueda
+
+            {% else %}
+                Tu colección creativa
+            {% endif %}
+        </h2>
+
+        <p>
+            Todo lo que inspira al taller, en un solo lugar.
+        </p>
+
+    </div>
+
+    {% if selected or search %}
+
+        <a class="text-link" href="{{ url_for('index') }}">
+            Ver todo ↗
+        </a>
+
+    {% endif %}
+
+</div>
+
+
+<!-- ================================================== -->
+<!-- ESTADÍSTICAS -->
+<!-- ================================================== -->
+
+<div class="stats">
+
+    {% for key, label in categories.items() %}
+
+        <a class="stat stat-link"
+           href="{{ url_for('index', categoria=key) }}">
+
+            <span class="stat-icon {{ key }}">
+                {{
+                    {
+                        'texto':'▤',
+                        'archivo':'▣',
+                        'imagen':'▧',
+                        'sonido':'♫',
+                        'video':'▶'
+                    }[key]
+                }}
+            </span>
+
+            <div>
+
+                <strong>
+                    {{ counts.get(key, 0) }}
+                </strong>
+
+                <small>
+                    {{ label }}
+                </small>
+
+            </div>
+
+        </a>
+
+    {% endfor %}
+
+</div>
+
+
+<!-- ================================================== -->
+<!-- ORDENAR MATERIALES -->
+<!-- ================================================== -->
+
+<form class="sort-bar"
+      action="{{ url_for('index') }}"
+      method="get">
+
+    {% if selected %}
+
+        <input type="hidden"
+               name="categoria"
+               value="{{ selected }}">
+
+    {% endif %}
+
+    {% if search %}
+
+        <input type="hidden"
+               name="buscar"
+               value="{{ search }}">
+
+    {% endif %}
+
+    <label for="orden">
+        Ordenar por:
+    </label>
+
+    <select id="orden"
+            name="orden"
+            onchange="this.form.submit()">
+
+        <option value="reciente"
+                {{ 'selected' if sort == 'reciente' }}>
+            Más recientes agregados
+        </option>
+
+        <option value="fecha_reciente"
+                {{ 'selected' if sort == 'fecha_reciente' }}>
+            Fecha: más nueva
+        </option>
+
+        <option value="fecha_antigua"
+                {{ 'selected' if sort == 'fecha_antigua' }}>
+            Fecha: más antigua
+        </option>
+
+        <option value="autor"
+                {{ 'selected' if sort == 'autor' }}>
+            Nombre del autor (A-Z)
+        </option>
+
+    </select>
+
+</form>
+
+
+<!-- ================================================== -->
+<!-- COLECCIÓN DE MATERIALES -->
+<!-- ================================================== -->
+
+{% if materials %}
+
+    <div class="materials-grid">
+
+        {% for item in materials %}
+
+            <article class="material-card">
+
+                <!-- ENCABEZADO DE TARJETA -->
+
+                <div class="card-top">
+
+                    <span class="type-icon {{ item.category }}">
+
+                        {{
+                            {
+                                'texto':'▤',
+                                'archivo':'▣',
+                                'imagen':'▧',
+                                'sonido':'♫',
+                                'video':'▶'
+                            }[item.category]
+                        }}
+
+                    </span>
+
+                    <span class="tag {{ item.category }}">
+                        {{ categories[item.category] }}
+                    </span>
+
+                </div>
+
+
+                <!-- INFORMACIÓN DEL MATERIAL -->
+
+                <h3>
+
+                    <a href="{{ url_for('detalle', item_id=item.id) }}">
+                        {{ item.title }}
+                    </a>
+
+                </h3>
+
+
+                {% if item.author %}
+
+                    <p class="byline">
+                        ✍ {{ item.author }}
+                    </p>
+
+                {% endif %}
+
+
+                {% if item.material_date %}
+
+                    <p class="byline">
+                        📅 {{ item.material_date }}
+                    </p>
+
+                {% endif %}
+
+
+                {% if item.description %}
+
+                    <p class="description">
+                        {{ item.description }}
+                    </p>
+
+                {% endif %}
+
+
+                <!-- VISTA PREVIA DE TEXTO -->
+
+                {% if item.category == 'texto' and item.body %}
+
+                    <div class="preview">
+
+                        {{ item.body[:180] }}
+
+                        {{ '…' if item.body|length > 180 else '' }}
+
+                    </div>
+
+                {% endif %}
+
+
+                <!-- ================================================== -->
+                <!-- IMÁGENES -->
+                <!-- ================================================== -->
+
+                {% if item.category == 'imagen' and item.file_url %}
+
+                    <div class="image-container">
+
+                        <a href="{{ item.file_url }}"
+                           target="_blank"
+                           rel="noopener noreferrer">
+
+                            <img
+                                class="preview-image"
+                                src="{{ item.file_url }}"
+                                alt="{{ item.title }}"
+                                loading="lazy"
+                                onerror="this.style.display='none'; this.parentElement.parentElement.querySelector('.image-error').style.display='block';"
+                            >
+
+                        </a>
+
+                        <p class="image-error"
+                           style="display:none;">
+
+                            No se pudo cargar esta imagen.
+
+                        </p>
+
+                    </div>
+
+                {% elif item.category == 'imagen' %}
+
+                    <p class="file-name">
+                        No hay una dirección disponible para esta imagen.
+                    </p>
+
+                {% endif %}
+
+
+                <!-- ================================================== -->
+                <!-- AUDIO -->
+                <!-- ================================================== -->
+
+                {% if item.category == 'sonido' and item.file_url %}
+
+                    <audio controls preload="none">
+
+                        <source src="{{ item.file_url }}">
+
+                        Tu navegador no puede reproducir este audio.
+
+                    </audio>
+
+                {% endif %}
+
+
+                <!-- ================================================== -->
+                <!-- VIDEOS -->
+                <!-- ================================================== -->
+
+                {% if item.category == 'video' and item.file_url %}
+
+                    <video class="preview-video"
+                           controls
+                           preload="metadata">
+
+                        <source src="{{ item.file_url }}">
+
+                        Tu navegador no puede reproducir este video.
+
+                    </video>
+
+                {% endif %}
+
+
+                <!-- ================================================== -->
+                <!-- DOCUMENTOS -->
+                <!-- ================================================== -->
+
+                {% if item.category == 'archivo' and item.original_name %}
+
+                    <p class="file-name">
+                        📄 {{ item.original_name }}
+                    </p>
+
+                {% endif %}
+
+
+                <!-- ================================================== -->
+                <!-- PIE DE TARJETA -->
+                <!-- ================================================== -->
+
+                <div class="card-bottom">
+
+                    <small>
+                        Agregado: {{ item.created_at }}
+                    </small>
+
+                    <div class="card-links">
+
+                        <a href="{{ url_for('detalle', item_id=item.id) }}">
+                            Abrir
+                        </a>
+
+                        {% if item.stored_name %}
+
+                            <a href="{{ url_for('descargar', item_id=item.id) }}">
+                                Descargar
+                            </a>
+
+                        {% endif %}
+
+                    </div>
+
+                </div>
+
+            </article>
+
+        {% endfor %}
+
+    </div>
+
+
+<!-- ================================================== -->
+<!-- GABINETE VACÍO -->
+<!-- ================================================== -->
+
+{% else %}
+
+    <div class="empty">
+
+        <div class="empty-icon">
+            ✧
+        </div>
+
+        <h3>
+            Tu gabinete está listo para inspirarse
+        </h3>
+
+        <p>
+
+            Aún no hay materiales publicados.
+
+            {% if session.get("is_member") %}
+
+                Agrega el primer contenido del colectivo.
+
+            {% else %}
+
+                Vuelve pronto para descubrir las creaciones del colectivo.
+
+            {% endif %}
+
+        </p>
+
+        {% if session.get("is_member") %}
+
+            <a class="action purple"
+               href="{{ url_for('nuevo') }}">
+
+                ＋ Agregar primer material
+
+            </a>
+
+        {% endif %}
+
+    </div>
+
+{% endif %}
+
+{% endblock %}
